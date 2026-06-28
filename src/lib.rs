@@ -1,13 +1,18 @@
 use std::{
     io::prelude::*,
     fs,
-    sync::Mutex,
-    sync::Arc,
+    rc::Rc,
     ffi::OsStr,
     path::PathBuf,
     path::Path,
+    thread,
 };
 type Byte = u8;
+
+pub mod thread_pool;
+
+use thread_pool::*;
+
 // PPM Format:
 // "P6" \n
 // $width $height\n
@@ -17,7 +22,7 @@ macro_rules! generate_task {
     () => {}
 }
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, Eq, PartialEq, PartialOrd, Ord)]
 pub struct Pixel {
     r: Byte,
     g: Byte,
@@ -25,7 +30,7 @@ pub struct Pixel {
     // pub inner: Mutex<InnerPixel>
 }
 
-struct Task<F> 
+struct Task<F>
     where F: Fn(Pixel, usize, usize, usize, usize, f64, f64, f64) -> Pixel + 'static {
     function: &'static F,
     pixel: Pixel,
@@ -38,14 +43,16 @@ struct Task<F>
     y_shift: f64,
 }
 
+#[derive(Copy, Clone)]
+struct UnsafeImage(pub *mut [u8]);
+
+unsafe impl Send for UnsafeImage {}
+unsafe impl Sync for UnsafeImage {}
+
 #[derive(Debug)]
 pub struct Image {
-    image: Arc<Mutex<Vec<Byte>>>,
+    image: Vec<Byte>,
     dimensions: (usize, usize),
-}
-
-pub struct ThreadPool {
-    pool: Vec<()>,
 }
 
 pub struct Shader<F> 
@@ -55,7 +62,7 @@ pub struct Shader<F>
     zoom: f64,
     x_shift: f64,
     y_shift: f64,
-    image: Arc<Image>,
+    image: Rc<Image>,
 }
 
 impl Pixel {
@@ -114,13 +121,13 @@ impl<F> Task<F>
 impl Image {
     pub fn new(width: usize, height: usize, base: Byte) -> Self {
         Self {
-            image: Mutex::new(vec![base; width * height * 3]).into(),
+            image: vec![base; width * height * 3],
             dimensions: (width, height),
         }
     }
     pub fn write<T>(&self, file_name: T) -> Result<(), Box<dyn std::error::Error>> 
     where T: AsRef<Path> {
-        let image = self.image.lock().unwrap();
+        let image = &self.image;
         let mut file = fs::File::create(file_name.as_ref())?;
         let (width, height) = self.dimensions;
 
@@ -145,36 +152,28 @@ impl Image {
         index += 5;
         let image_data = Vec::from(&file[index..]);
         let mut raw_number_split = raw_numbers.split_whitespace();
-        let raw_width = raw_number_split.next().expect("Some");
-        let raw_height = raw_number_split.next().expect("Some");
+        let raw_width = raw_number_split.next().expect("[ERR] width");
+        let raw_height = raw_number_split.next().expect("[ERR] height");
         dbg!(&raw_width);
         dbg!(&raw_height);
         let width: usize = raw_width.parse()?;
         let height: usize = raw_height.parse()?;
         Ok(Self {
-            image: Mutex::new(image_data).into(),
+            image: image_data,
             dimensions: (width, height),
         })
     }
 }
 
-impl ThreadPool {
-    pub fn new() -> Self {
-        Self {
-            pool: Vec::new(),
-        }
-    }
-}
-
 impl<F> Shader<F> 
-    where F: Fn(Pixel, usize, usize, usize, usize, f64, f64, f64) -> Pixel + 'static {
+    where F: Fn(Pixel, usize, usize, usize, usize, f64, f64, f64) -> Pixel + 'static + std::marker::Sync {
 
     pub fn new(
         pixel_fn: &'static F,
         zoom: f64,
         x_shift: f64,
         y_shift: f64,
-        image: Image<>,
+        image: Image,
     ) -> Self { 
         Self {
             pixel_fn,
@@ -184,7 +183,7 @@ impl<F> Shader<F>
             image: image.into(),
         }
     }
-    pub fn get_task(&self, x: usize, y: usize, pixel: Pixel) -> Task<F> { 
+    pub fn get_task(&self, x: usize, y: usize, pixel: Pixel) -> Task<F> {
         let (width, height) = self.image.dimensions;
         let task = Task::new(
             self.pixel_fn,
@@ -200,24 +199,38 @@ impl<F> Shader<F>
 
         task
     }
-    pub fn apply_shader(self, _thread_pool: &mut ThreadPool) -> Arc<Image> {
+    pub fn apply_shader(self, _thread_pool: &mut ThreadPool) -> Rc<Image> {
         {
-            let mut image = self.image.image.lock().unwrap();
+            let mut image = UnsafeImage(&*self.image.image as *const [u8] as *mut [u8]);
             let mut x = 0;
             let mut y = 0;
             let (width, height) = self.image.dimensions;
+            // let mut threads = Vec::new();
             for x in 0..width {
                 for y in 0..height {
-                    let pixel = Pixel::new(image[(y*width + x)*3],
-                    image[(y*width + x)*3 + 1],
-                    image[(y*width + x)*3 + 2]);
+                    let pixel;
+                    unsafe {
+                        pixel = Pixel::new(
+                            (*(image.0))[(y*width + x)*3],
+                            (*(image.0))[(y*width + x)*3 + 1],
+                            (*(image.0))[(y*width + x)*3 + 2]);
+                    }
                     let task = self.get_task(x, y, pixel);
                     let (r,g,b) = task.execute().get_rgb();
-                    image[(y*width + x)*3] = r;
-                    image[(y*width + x)*3 + 1] = g;
-                    image[(y*width + x)*3 + 2] = b;
+                    let wrapped_image = image;
+                    let p_image = wrapped_image.0;
+                    unsafe {
+                        (&mut *p_image)[(y*width + x)*3] = r;
+                        (&mut *p_image)[(y*width + x)*3 + 1] = g;
+                        (&mut *p_image)[(y*width + x)*3 + 2] = b;
+                    }
+                    //threads.push(thread::spawn(move || {
+                    // }));
                 }
             }
+            // threads.into_iter().map(|val| {
+            //     _ = val.join().expect("[ERR] Couldnt do task");
+            // });
         }
         self.image
     }
