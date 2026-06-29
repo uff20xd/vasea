@@ -1,6 +1,5 @@
 use std::{
-    io::prelude::*,
-    fs,
+    io::prelude::*, fs,
     rc::Rc,
     ffi::OsStr,
     path::PathBuf,
@@ -17,10 +16,15 @@ use thread_pool::*;
 // "P6" \n
 // $width $height\n
 // $max_colour_component_value\n
-// (($r as byte)($g as byte)($b as byte))+
-macro_rules! generate_task {
-    () => {}
-}
+
+#[derive(Copy, Clone)]
+struct UnsafeImage(pub *mut [u8]);
+
+unsafe impl Send for UnsafeImage {}
+unsafe impl Sync for UnsafeImage {}
+
+pub trait ShaderMetadata {}
+
 
 #[derive(Debug, Default, Clone, Copy, Eq, PartialEq, PartialOrd, Ord)]
 pub struct Pixel {
@@ -30,42 +34,8 @@ pub struct Pixel {
     // pub inner: Mutex<InnerPixel>
 }
 
-struct Task<F>
-    where F: Fn(Pixel, usize, usize, usize, usize, f64, f64, f64) -> Pixel + 'static {
-    function: &'static F,
-    pixel: Pixel,
-    x: usize,
-    y: usize,
-    width: usize,
-    height: usize,
-    zoom: f64,
-    x_shift: f64,
-    y_shift: f64,
-}
-
-#[derive(Copy, Clone)]
-struct UnsafeImage(pub *mut [u8]);
-
-unsafe impl Send for UnsafeImage {}
-unsafe impl Sync for UnsafeImage {}
-
-#[derive(Debug)]
-pub struct Image {
-    image: Vec<Byte>,
-    dimensions: (usize, usize),
-}
-
-pub struct Shader<F> 
-    where F: Fn(Pixel, usize, usize, usize, usize, f64, f64, f64) -> Pixel + 'static {
-    // x, y, zoom, width, height
-    pixel_fn: &'static F,
-    zoom: f64,
-    x_shift: f64,
-    y_shift: f64,
-    image: Rc<Image>,
-}
-
 impl Pixel {
+    #[inline(always)]
     pub fn new(r: Byte, g: Byte, b: Byte) -> Self {
         Self {
             r,
@@ -73,33 +43,37 @@ impl Pixel {
             b,
         }
     }
+    #[inline(always)]
     pub fn get_rgb(&self) -> (Byte, Byte, Byte){
         (self.r, self.g, self.b)
     }
 }
-impl<F> Task<F>
-    where F: Fn(Pixel, usize, usize, usize, usize, f64, f64, f64) -> Pixel + 'static {
+
+struct Task<F, METADATA>
+    where METADATA: ShaderMetadata,
+        F: Fn(Pixel, usize, usize, Rc<METADATA>) -> Pixel + 'static {
+    function: &'static F,
+    pixel: Pixel,
+    x: usize,
+    y: usize,
+    metadata: Rc<METADATA>,
+}
+impl<F, METADATA> Task<F, METADATA>
+    where METADATA: ShaderMetadata,
+        F: Fn(Pixel, usize, usize, Rc<METADATA>) -> Pixel + 'static {
     pub fn new(
         function: &'static F,
         pixel: Pixel,
         x: usize,
         y: usize,
-        width: usize,
-        height: usize,
-        zoom: f64,
-        x_shift: f64,
-        y_shift: f64,
-    ) -> Task<F> {
+        metadata: Rc<METADATA>,
+    ) -> Task<F, METADATA> {
         Self {
             function,
             pixel,
             x,
             y,
-            width,
-            height,
-            zoom,
-            x_shift,
-            y_shift,
+            metadata,
         }
     }
 
@@ -109,27 +83,31 @@ impl<F> Task<F>
             self.pixel,
             self.x,
             self.y,
-            self.width,
-            self.height,
-            self.zoom,
-            self.x_shift,
-            self.y_shift,
+            self.metadata.clone(),
         )
     }
 }
 
+#[derive(Debug)]
+pub struct Image {
+    image: Vec<Byte>,
+    pub width: usize,
+    pub height: usize,
+}
 impl Image {
     pub fn new(width: usize, height: usize, base: Byte) -> Self {
         Self {
             image: vec![base; width * height * 3],
-            dimensions: (width, height),
+            width,
+            height,
         }
     }
     pub fn write<T>(&self, file_name: T) -> Result<(), Box<dyn std::error::Error>> 
     where T: AsRef<Path> {
         let image = &self.image;
         let mut file = fs::File::create(file_name.as_ref())?;
-        let (width, height) = self.dimensions;
+        let width = self.width;
+        let height = self.height;
 
         let size: Vec<u8> = format!("{} {}\n", width, height).bytes().collect();
         _ = file.write(&(b"P6\n")[..]);
@@ -160,79 +138,182 @@ impl Image {
         let height: usize = raw_height.parse()?;
         Ok(Self {
             image: image_data,
-            dimensions: (width, height),
+            width,
+            height,
         })
     }
 }
 
-impl<F> Shader<F> 
-    where F: Fn(Pixel, usize, usize, usize, usize, f64, f64, f64) -> Pixel + 'static + std::marker::Sync {
+pub struct Shader<F, METADATA>
+    where METADATA: ShaderMetadata,
+        F: Fn(Pixel, usize, usize, Rc<METADATA>) -> Pixel + 'static {
+    // x, y, zoom, width, height
+    pixel_fn: &'static F,
+    metadata: Rc<METADATA>,
+    image: Rc<Image>,
+    shader_range: ShaderRange,
+}
+
+impl<F, METADATA> Shader<F, METADATA> 
+    where METADATA: ShaderMetadata,
+        F: Fn(Pixel, usize, usize, Rc<METADATA>) -> Pixel + 'static {
 
     pub fn new(
         pixel_fn: &'static F,
-        zoom: f64,
-        x_shift: f64,
-        y_shift: f64,
+        shader_range: ShaderRange,
+        metadata: Rc<METADATA>,
         image: Image,
     ) -> Self { 
         Self {
             pixel_fn,
-            zoom,
-            x_shift,
-            y_shift,
+            metadata,
             image: image.into(),
+            shader_range,
         }
     }
-    pub fn get_task(&self, x: usize, y: usize, pixel: Pixel) -> Task<F> {
-        let (width, height) = self.image.dimensions;
+    #[inline(always)]
+    pub fn get_task(&self, x: usize, y: usize, pixel: Pixel) -> Task<F, METADATA> {
+        let width = self.image.width;
+        let height = self.image.height;
         let task = Task::new(
             self.pixel_fn,
             pixel,
             x,
             y,
-            width,
-            height,
-            self.zoom,
-            self.x_shift,
-            self.y_shift,
+            self.metadata.clone(),
         );
 
         task
     }
-    pub fn apply_shader(self, _thread_pool: &mut ThreadPool) -> Rc<Image> {
-        {
-            let mut image = UnsafeImage(&*self.image.image as *const [u8] as *mut [u8]);
-            let mut x = 0;
-            let mut y = 0;
-            let (width, height) = self.image.dimensions;
-            // let mut threads = Vec::new();
-            for x in 0..width {
-                for y in 0..height {
-                    let pixel;
-                    unsafe {
-                        pixel = Pixel::new(
-                            (*(image.0))[(y*width + x)*3],
-                            (*(image.0))[(y*width + x)*3 + 1],
-                            (*(image.0))[(y*width + x)*3 + 2]);
-                    }
-                    let task = self.get_task(x, y, pixel);
-                    let (r,g,b) = task.execute().get_rgb();
-                    let wrapped_image = image;
-                    let p_image = wrapped_image.0;
-                    unsafe {
-                        (&mut *p_image)[(y*width + x)*3] = r;
-                        (&mut *p_image)[(y*width + x)*3 + 1] = g;
-                        (&mut *p_image)[(y*width + x)*3 + 2] = b;
-                    }
-                    //threads.push(thread::spawn(move || {
-                    // }));
+    pub fn apply_shader(self) -> Rc<Image> {
+        let mut image = UnsafeImage(&*self.image.image as *const [u8] as *mut [u8]);
+        let width = self.image.width;
+        let height = self.image.height;
+        // let mut threads = Vec::new();
+        let width_range = self.shader_range.x_len;
+        let height_range = self.shader_range.y_len;
+        for x in 0..width_range {
+            for y in 0..height_range {
+                let x = x + self.shader_range.x_offset;
+                let y = y + self.shader_range.y_offset;
+                let pixel;
+                unsafe {
+                    pixel = Pixel::new(
+                        (*(image.0))[(y*width + x)*3],
+                        (*(image.0))[(y*width + x)*3 + 1],
+                        (*(image.0))[(y*width + x)*3 + 2]);
+                }
+                let task = self.get_task(x, y, pixel);
+                let (r,g,b) = task.execute().get_rgb();
+                let wrapped_image = image;
+                let p_image = wrapped_image.0;
+                unsafe {
+                    (&mut *p_image)[(y*width + x)*3] = r;
+                    (&mut *p_image)[(y*width + x)*3 + 1] = g;
+                    (&mut *p_image)[(y*width + x)*3 + 2] = b;
                 }
             }
-            // threads.into_iter().map(|val| {
-            //     _ = val.join().expect("[ERR] Couldnt do task");
-            // });
         }
         self.image
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum RangeType {
+    Percent,
+    Pixel,
+}
+
+#[derive(Clone, Copy)]
+pub struct ShaderRange {
+    x_offset: usize,
+    y_offset: usize,
+    x_len: usize,
+    y_len: usize,
+}
+
+impl ShaderRange {
+    pub fn new(
+        x_offset: usize,
+        y_offset: usize,
+        x_len: usize,
+        y_len: usize,
+    ) -> Self {
+        Self {
+            x_offset,
+            y_offset,
+            x_len,
+            y_len,
+        }
+    }
+    pub fn from_image(
+        image: &Image,
+        range_type: RangeType,
+        x_offset: f64,
+        y_offset: f64,
+        x_len: f64,
+        y_len: f64,
+    ) -> Self {
+        match range_type {
+            RangeType::Percent => {
+                let x_offset = ((x_offset / 100.0) * image.width as f64) as usize;
+                let y_offset = ((y_offset / 100.0) * image.height as f64) as usize;
+                let x_len = ((x_len / 100.0) * image.width as f64) as usize;
+                let y_len = ((y_len / 100.0) * image.height as f64) as usize;
+                Self {
+                    x_offset,
+                    y_offset,
+                    x_len,
+                    y_len,
+                }
+            },
+            RangeType::Pixel => {
+                let x_offset = x_offset as usize;
+                let y_offset = y_offset as usize;
+                let x_len = x_len as usize;
+                let y_len = y_len as usize;
+                Self {
+                    x_offset,
+                    y_offset,
+                    x_len,
+                    y_len,
+                }
+            },
+        }
+    }
+    pub fn from_image_duo(
+        image: &Image,
+        range_type: RangeType,
+        x_offset: f64,
+        y_offset: f64,
+        overlay_image: &Image,
+    ) -> Self {
+        match range_type {
+            RangeType::Percent => {
+                let x_offset = ((x_offset / 100.0) * x_offset) as usize;
+                let y_offset = ((y_offset / 100.0) * y_offset) as usize;
+                let x_len = overlay_image.width;
+                let y_len = overlay_image.height;
+                Self {
+                    x_offset,
+                    y_offset,
+                    x_len,
+                    y_len,
+                }
+            },
+            RangeType::Pixel => {
+                let x_offset = x_offset as usize;
+                let y_offset = y_offset as usize;
+                let x_len = overlay_image.width;
+                let y_len = overlay_image.height;
+                Self {
+                    x_offset,
+                    y_offset,
+                    x_len,
+                    y_len,
+                }
+            },
+        }
     }
 }
 

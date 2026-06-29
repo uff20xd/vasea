@@ -4,6 +4,7 @@ use std::{
     io::prelude::*,
     fs,
     num::Wrapping,
+    rc::Rc,
 };
 type Byte = u8;
 const SCALE: usize = 1;
@@ -11,23 +12,65 @@ const XDIM: usize = SCALE * 16 * 40;
 const YDIM: usize = SCALE * 16 * 40;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut thread_pool = thread_pool::ThreadPool::new(0);
     let input = "./tests/saul.ppm";
     let out = "./out/output.ppm";
     let zoom = 1200.2;
     let x_shift = -0.01;
     let y_shift = 0.64;
-    // let in_image = Image::read_ppm(input)?;
-    let in_image = Image::new(YDIM, XDIM , 255);
-    let shader = Shader::new(&mandel_brot_shader, zoom, x_shift, y_shift, in_image);
-    let image = shader.apply_shader(&mut thread_pool);
+    let in_image = Image::read_ppm(input)?;
+    // let in_image = Image::new(YDIM, XDIM , 255);
+    let shader_range = ShaderRange::from_image(
+        &in_image,
+        RangeType::Percent,
+        25.0,
+        30.0,
+        50.0,
+        50.0,
+        );
+    let shader = Shader::new(
+        &mandel_brot_shader,
+        shader_range,
+        Rc::new(
+            MandelMetadata {
+                width: in_image.width,
+                height: in_image.height,
+                zoom,
+                x_shift,
+                y_shift,
+            }
+        ),
+        in_image
+    );
+    let image = shader.apply_shader();
     image.write(out);
     
     Ok(())
 }
 
+struct EditorMetadata {
+    width: usize,
+    height: usize,
+    shader_range: ShaderRange,
+}
+
+struct MandelMetadata {
+    width: usize,
+    height: usize,
+    zoom: f64,
+    x_shift: f64,
+    y_shift: f64,
+}
+
+impl ShaderMetadata for MandelMetadata {}
+
 // x, y, zoom, width, height
-fn mandel_brot_shader(in_pixel: Pixel, x: usize, y: usize, width: usize, height: usize, zoom: f64,  x_shift: f64, y_shift: f64) -> Pixel {
+fn mandel_brot_shader(in_pixel: Pixel, x: usize, y: usize, metadata: Rc<MandelMetadata>) -> Pixel {
+    let width = metadata.width;
+    let height = metadata.height;
+    let zoom = metadata.zoom;
+    let x_shift = metadata.x_shift;
+    let y_shift = metadata.y_shift;
+
     let (in_r, in_g, in_b) = in_pixel.get_rgb();
     if in_r < 230 ||
        in_g < 230 ||
@@ -36,8 +79,8 @@ fn mandel_brot_shader(in_pixel: Pixel, x: usize, y: usize, width: usize, height:
         return in_pixel;
     }
     let (in_r, in_g, in_b) = (255, 255, 255);
-    if (height*x + y)%(SCALE * SCALE * 50000) == 0 {
-        println!("{}% finished!", (((height*x + y) as f64 / (width * height) as f64)) * 100.0)
+    if (height*x + y)%((width * height)/200) == 0 {
+        println!("{}% finished!", ((((height*x + y) as f64 / (width * height) as f64)) * 100.0) as usize)
     }
     let zoom_mult = 1.0 / zoom;
     let scaling = width.min(height);
