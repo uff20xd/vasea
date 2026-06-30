@@ -1,5 +1,6 @@
 //extern vasae;
 use vasea::*;
+use vasea::shipped_shaders::editor::*;
 use std::{
     io::prelude::*,
     fs,
@@ -10,17 +11,16 @@ type Byte = u8;
 const SCALE: usize = 1;
 const XDIM: usize = SCALE * 16 * 40;
 const YDIM: usize = SCALE * 16 * 40;
+const CANVAS: &[u8] = include_bytes!("saul.ppm");
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let input = "./tests/saul.ppm";
     let out = "./out/output.ppm";
-    let zoom = 1200.2;
-    let x_shift = -0.01;
-    let y_shift = 0.64;
-    let in_image = Image::read_ppm(input)?;
-    // let in_image = Image::new(YDIM, XDIM , 255);
+    let eminem = "./tests/eminem_test.ppm";
+    let canvas = Image::parse_ppm(CANVAS)?;
+    let in_image = Image::new(YDIM, XDIM , 255);
     let shader_range = ShaderRange::from_image(
-        &in_image,
+        &canvas,
         RangeType::Percent,
         25.0,
         30.0,
@@ -31,26 +31,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mandel_brot_shader,
         shader_range,
         Rc::new(
-            MandelMetadata {
-                width: in_image.width,
-                height: in_image.height,
-                zoom,
-                x_shift,
-                y_shift,
+            MandelMetadata { width: canvas.width,
+                height: canvas.height,
+                zoom: 1200.2,
+                x_shift: -0.01,
+                y_shift: 0.64,
             }
         ),
-        in_image
+        canvas 
     );
-    let image = shader.apply_shader();
-    image.write(out);
+    let canvas = shader.apply_shader();
+
+    let shader_range = ShaderRange::full(&canvas);
+    let shader = Shader::new(
+        &layer_shader,
+        shader_range,
+        Rc::new(
+            LayerMetadata {
+                width: canvas.width,
+                height: canvas.height,
+                zoom: 1.2,
+                transparency: 0.5,
+                image: Image::read_ppm(eminem)?,
+                shader_range,
+                rotation: 0.0,
+            }
+        ),
+        canvas 
+    );
+    let canvas = shader.apply_shader();
+    canvas.write(out);
     
     Ok(())
-}
-
-struct EditorMetadata {
-    width: usize,
-    height: usize,
-    shader_range: ShaderRange,
 }
 
 struct MandelMetadata {
@@ -62,7 +74,6 @@ struct MandelMetadata {
 }
 
 impl ShaderMetadata for MandelMetadata {}
-
 // x, y, zoom, width, height
 fn mandel_brot_shader(in_pixel: Pixel, x: usize, y: usize, metadata: Rc<MandelMetadata>) -> Pixel {
     let width = metadata.width;

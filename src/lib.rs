@@ -9,6 +9,7 @@ use std::{
 type Byte = u8;
 
 pub mod thread_pool;
+pub mod shipped_shaders;
 
 use thread_pool::*;
 
@@ -31,7 +32,6 @@ pub struct Pixel {
     r: Byte,
     g: Byte,
     b: Byte,
-    // pub inner: Mutex<InnerPixel>
 }
 
 impl Pixel {
@@ -90,7 +90,7 @@ impl<F, METADATA> Task<F, METADATA>
 
 #[derive(Debug)]
 pub struct Image {
-    image: Vec<Byte>,
+    pub image: Vec<Byte>,
     pub width: usize,
     pub height: usize,
 }
@@ -120,15 +120,18 @@ impl Image {
     pub fn read_ppm<T>(file_name: T) -> Result<Self, Box<dyn std::error::Error>>
     where T: AsRef<Path> {
         let mut file = fs::read(file_name.as_ref())?;
+        Self::parse_ppm(&file)
+    }
+    pub fn parse_ppm(raw_ppm: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
         let mut index = 3;
         let mut raw_numbers = String::new();
         loop {
-            if file[index] == 10 { break; }
-            raw_numbers.push(file[index] as char);
+            if raw_ppm[index] == 10 { break; }
+            raw_numbers.push(raw_ppm[index] as char);
             index += 1;
         }
         index += 5;
-        let image_data = Vec::from(&file[index..]);
+        let image_data = Vec::from(&raw_ppm[index..]);
         let mut raw_number_split = raw_numbers.split_whitespace();
         let raw_width = raw_number_split.next().expect("[ERR] width");
         let raw_height = raw_number_split.next().expect("[ERR] height");
@@ -150,7 +153,7 @@ pub struct Shader<F, METADATA>
     // x, y, zoom, width, height
     pixel_fn: &'static F,
     metadata: Rc<METADATA>,
-    image: Rc<Image>,
+    image: Image,
     shader_range: ShaderRange,
 }
 
@@ -167,7 +170,7 @@ impl<F, METADATA> Shader<F, METADATA>
         Self {
             pixel_fn,
             metadata,
-            image: image.into(),
+            image: image,
             shader_range,
         }
     }
@@ -185,8 +188,8 @@ impl<F, METADATA> Shader<F, METADATA>
 
         task
     }
-    pub fn apply_shader(self) -> Rc<Image> {
-        let mut image = UnsafeImage(&*self.image.image as *const [u8] as *mut [u8]);
+    pub fn apply_shader(mut self) -> Image {
+        let mut image = UnsafeImage(&mut *self.image.image as *mut [u8]);
         let width = self.image.width;
         let height = self.image.height;
         // let mut threads = Vec::new();
@@ -313,6 +316,14 @@ impl ShaderRange {
                     y_len,
                 }
             },
+        }
+    }
+    pub fn full(canvas: &Image) -> Self {
+        Self {
+            x_offset: 0,
+            y_offset: 0,
+            x_len: canvas.width,
+            y_len: canvas.height,
         }
     }
 }
