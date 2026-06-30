@@ -1,6 +1,6 @@
 //extern vasae;
 use vasea::*;
-use vasea::shipped_shaders::editor::*;
+use shipped_shaders::editor::*;
 use std::{
     io::prelude::*,
     fs,
@@ -12,6 +12,7 @@ const SCALE: usize = 1;
 const XDIM: usize = SCALE * 16 * 40;
 const YDIM: usize = SCALE * 16 * 40;
 const CANVAS: &[u8] = include_bytes!("saul.ppm");
+const EMINEM: &[u8] = include_bytes!("eminem_test.ppm");
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let input = "./tests/saul.ppm";
@@ -31,7 +32,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mandel_brot_shader,
         shader_range,
         Rc::new(
-            MandelMetadata { width: canvas.width,
+            MandelMetadata {
+                width: canvas.width,
                 height: canvas.height,
                 zoom: 1200.2,
                 x_shift: -0.01,
@@ -52,12 +54,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 height: canvas.height,
                 zoom: 1.2,
                 transparency: 0.5,
-                image: Image::read_ppm(eminem)?,
+                image: Image::parse_ppm(EMINEM)?,
                 shader_range,
                 rotation: 0.0,
             }
         ),
-        canvas 
+        canvas
     );
     let canvas = shader.apply_shader();
     canvas.write(out);

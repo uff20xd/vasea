@@ -1,4 +1,3 @@
-
 pub mod editor {
     use crate::*;
     pub struct LayerMetadata {
@@ -12,7 +11,6 @@ pub mod editor {
     }
 
     impl ShaderMetadata for LayerMetadata {}
-
 
     pub fn layer_shader(in_pixel: Pixel, raw_x: usize, raw_y: usize, metadata: Rc<LayerMetadata>) -> Pixel {
         let width = metadata.width;
